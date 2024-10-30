@@ -49,10 +49,11 @@ def main(args):
     assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
     torch.set_grad_enabled(False)
 
-    # Setup DDP:cd
-    dist.init_process_group("nccl")
+    # Setup Distributed Data Parallel (DDP)
+    dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
+    torch.cuda.set_device(device)
     seed = args.global_seed * dist.get_world_size() + rank
     torch.manual_seed(seed)
     torch.cuda.set_device(device)
@@ -119,8 +120,16 @@ def main(args):
     for i in pbar:
         # Sample inputs:
         z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
-        y = torch.randint(0, args.num_classes, (n,), device=device)
-
+        
+        if args.selected_classes:
+            # 从指定的类别中均匀随机选择
+            y = torch.tensor(
+                np.random.choice(args.selected_classes, size=n),
+                device=device
+            )
+        else:
+            y = torch.randint(0, args.num_classes, (n,), device=device)
+        
         # Setup classifier-free guidance:
         if using_cfg:
             z = torch.cat([z, z], 0)
@@ -160,16 +169,27 @@ def main(args):
                 255. * samples, 0, 255
                 ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
 
-            # Save samples to disk as individual .png files
+
+            # Prepare class indices
+            y_processed = y[:n].cpu().numpy() if using_cfg else y.cpu().numpy()
+
+            # Save samples to disk in class-specific subdirectories
             for i, sample in enumerate(samples):
                 index = i * dist.get_world_size() + rank + total
-                Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
+                class_idx = y_processed[i]
+                class_dir = f"{sample_folder_dir}/{class_idx}"
+                os.makedirs(class_dir, exist_ok=True)
+                Image.fromarray(sample).save(f"{class_dir}/{index:06d}.png")
+            # # Save samples to disk as individual .png files
+            # for i, sample in enumerate(samples):
+            #     index = i * dist.get_world_size() + rank + total
+            #     Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
         total += global_batch_size
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
     dist.barrier()
     if rank == 0:
-        create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
+        # create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
         print("Done.")
     dist.barrier()
     dist.destroy_process_group()
@@ -191,6 +211,8 @@ if __name__ == "__main__":
     # model
     parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-XL/2")
     parser.add_argument("--num-classes", type=int, default=1000)
+    parser.add_argument("--classes", type=str, default=None, 
+                    help="Comma-separated list of class indices to generate. Example: '0,1,2'")
     parser.add_argument("--encoder-depth", type=int, default=8)
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
     parser.add_argument("--fused-attn", action=argparse.BooleanOptionalAction, default=False)
@@ -218,4 +240,17 @@ if __name__ == "__main__":
 
 
     args = parser.parse_args()
+    
+    if args.classes:
+        try:
+            # 解析用户输入的类别，分割并转换为整数
+            selected_classes = [int(cls) for cls in args.classes.split(',')]
+            assert all(0 <= cls < args.num_classes for cls in selected_classes), "类别索引超出范围。"
+            args.selected_classes = selected_classes
+        except ValueError:
+            raise ValueError("请提供有效的整数类别索引，使用逗号分隔。例如: '0,1,2'")
+    else:
+        # 如果未指定，使用所有类别
+        args.selected_classes = list(range(args.num_classes))
+    
     main(args)

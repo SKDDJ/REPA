@@ -1,2 +1,5 @@
 *.DS_Store
 .vscode/
+__pycache__/
+pretrained_models/
+samples/

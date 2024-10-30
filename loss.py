@@ -5,6 +5,11 @@ import torch.nn.functional as F
 def mean_flat(x):
     """
     Take the mean over all non-batch dimensions.
+
+    Example:
+        >>> x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        >>> mean_flat(x)
+        tensor([1.5, 3.5])
     """
     return torch.mean(x, dim=list(range(1, len(x.size()))))
 
@@ -75,6 +80,7 @@ class SILoss:
         else:
             raise NotImplementedError() # TODO: add x or eps prediction
         model_output, zs_tilde  = model(model_input, time_input.flatten(), **model_kwargs)
+        # todo: mse loss for diffusion model, velocity -> noise
         denoising_loss = mean_flat((model_output - model_target) ** 2)
 
         # projection loss
